@@ -646,7 +646,8 @@ async function subirADrive(file, contexto, onProgreso) {
     method: "POST",
     headers: { "Content-Type": "application/json", "x-app-token": api.token },
     body: JSON.stringify({
-      nombre: file.name, mimeType: file.type || "application/octet-stream", tamano: total,
+      nombre: contexto.nombreFinal || file.name,
+      mimeType: file.type || "application/octet-stream", tamano: total,
       briefCode: contexto.briefCode, briefTitulo: contexto.briefTitulo, editorNombre: contexto.editorNombre,
     }),
   });
@@ -841,6 +842,55 @@ function deliveryFieldPolicy(identity) {
   return { duracion: "archivo", fecha: "auto", link: "oculto" };
 }
 
+/* ---------- nombre automático del archivo ---------- */
+function slugTexto(t, largo) {
+  const limpio = String(t == null ? "" : t)
+    .normalize("NFD").replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  return limpio.slice(0, largo || 28).replace(/-+$/, "");
+}
+function extensionDe(nombre) {
+  const m = String(nombre || "").match(/\.([a-z0-9]{2,5})$/i);
+  return m ? "." + m[1].toLowerCase() : ".mp4";
+}
+/** 2026-08-09_HGRA-MAR-03-FLOW-A_zombi-madrugadas.mp4 */
+function nombreArchivo(opts) {
+  const o = opts || {};
+  const fecha = /^\d{4}-\d{2}-\d{2}$/.test(o.date || "") ? o.date : todayISO();
+  const codigo = String(o.code || "SIN-CODIGO") + (o.letra ? "-" + o.letra : "");
+  const avatar = slugTexto(o.avatar, 28);
+  const partes = [fecha, codigo];
+  if (avatar) partes.push(avatar);
+  return partes.join("_") + extensionDe(o.fileName);
+}
+function nombresDePieza(delivery, opts) {
+  const o = opts || {};
+  const base = { date: delivery.date, code: delivery.code, avatar: delivery.avatar };
+  const out = [{
+    driveId: delivery.driveId || null,
+    nombre: nombreArchivo({ ...base, letra: (delivery.variants || []).length ? "A" : "", fileName: delivery.fileName }),
+  }];
+  (delivery.variants || []).forEach((v, i) => {
+    out.push({ driveId: v.driveId || null,
+      nombre: nombreArchivo({ ...base, letra: variantLabel(i + 1), fileName: v.fileName }) });
+  });
+  return out.filter((x) => (o.soloConDrive ? x.driveId : true));
+}
+
+/** Le pide al servidor que ponga el nombre definitivo en Drive. */
+async function renombrarEnDrive(archivos) {
+  const api = RR_API();
+  if (!api || !archivos.length) return { ok: false, omitido: true };
+  try {
+    const r = await fetch("/api/drive/rename", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-app-token": api.token },
+      body: JSON.stringify({ archivos }),
+    });
+    return await r.json();
+  } catch (e) { return { ok: false, error: String(e.message || e) }; }
+}
+
 function validateDelivery(d, ctx) {
   const errs = {};
   if (!d.title || !String(d.title).trim()) errs.title = "Poné un nombre para el video.";
@@ -852,6 +902,9 @@ function validateDelivery(d, ctx) {
   if (d.driveUrl && !/^https?:\/\//i.test(String(d.driveUrl).trim())) errs.driveUrl = "El link tiene que empezar con https://";
   if (ctx && ctx.requireFileDuration && d.durationSource !== "file") {
     errs.seconds = "La duración tiene que salir del archivo. Soltá el video para que la lea.";
+  }
+  if (ctx && ctx.requiereAvatar && !(d.avatar && String(d.avatar).trim())) {
+    errs.avatar = "Decí a qué avatar apunta este video.";
   }
   if (!d.date || !/^\d{4}-\d{2}-\d{2}$/.test(d.date)) errs.date = "Fecha inválida.";
   else if (ctx && ctx.maxDate && d.date > ctx.maxDate) errs.date = "No se puede cargar una entrega a futuro.";
@@ -1767,6 +1820,8 @@ function DeliveryEditor({ delivery, state, identity, onSave, onClose, onDelete }
         const r = await subirADrive(file, {
           briefCode: brief ? brief.code : "", briefTitulo: brief ? brief.title : "",
           editorNombre: editor ? editor.name : identity.name,
+          nombreFinal: nombreArchivo({ date: f.date, code, avatar: f.avatar,
+            letra: variants.length ? "A" : "", fileName: file.name }),
         }, (pct) => setProgreso(pct));
         setProgreso(null);
         setF((p) => ({ ...p, driveUrl: r.url || p.driveUrl, driveId: r.driveId, rutaDrive: r.ruta }));
@@ -1814,6 +1869,8 @@ function DeliveryEditor({ delivery, state, identity, onSave, onClose, onDelete }
       const r = await subirADrive(file, {
         briefCode: brief ? brief.code : "", briefTitulo: brief ? brief.title : "",
         editorNombre: editor ? editor.name : identity.name,
+        nombreFinal: nombreArchivo({ date: f.date, code, avatar: f.avatar,
+          letra: variantLabel(i + 1), fileName: file.name }),
       }, (pct) => setProgresoHook({ i, pct }));
       setVariant(i, { driveUrl: r.url || "", driveId: r.driveId });
     } catch (e) {
@@ -1833,7 +1890,8 @@ function DeliveryEditor({ delivery, state, identity, onSave, onClose, onDelete }
         : "Hay " + hooksSinVideo + " hooks sin video. Cargalos o quitalos de la lista." });
       return;
     }
-    const v = validateDelivery(f, { maxDate: todayISO(), requireFileDuration: politica.duracion === "archivo" && !delivery });
+    const v = validateDelivery(f, { maxDate: todayISO(), requiereAvatar: true,
+      requireFileDuration: politica.duracion === "archivo" && !delivery });
     if (!v.ok) { setErrs(v.errors); return; }
     // Con la entrega ya aprobada solo viajan los links: el resto queda como estaba.
     if (bloqueado && delivery) {
@@ -1873,6 +1931,13 @@ function DeliveryEditor({ delivery, state, identity, onSave, onClose, onDelete }
           <input className="inp" value={f.title} disabled={bloqueado}
             onChange={(e) => set("title", e.target.value)} placeholder="Quiz 5 síntomas — v2" />
         </Field>
+        <Field label="Avatar al que apunta" error={errs.avatar}
+          hint="A quién le habla este video. Va en el nombre del archivo y sirve para comparar rendimiento por avatar.">
+          <input className="inp" value={f.avatar || ""} disabled={bloqueado}
+            onChange={(e) => set("avatar", e.target.value)}
+            placeholder="El zombi de las madrugadas" />
+        </Field>
+
         <Field label="Plataforma" error={errs.platform}>
           <div className="seg" style={{ display: "flex", width: "100%", opacity: bloqueado ? .5 : 1 }}>
             {PLATFORM_IDS.map((p) => (
@@ -2030,7 +2095,7 @@ function BulkUpload({ state, identity, onSave, onClose, notify }) {
   const [common, setCommon] = useState({
     briefId: myBriefs[0] ? myBriefs[0].id : "",
     editorId: isAdmin ? (config.editors[0] || {}).id : identity.editorId,
-    platform: "flow", date: todayISO(), status: "entregado",
+    platform: "flow", date: todayISO(), status: "entregado", avatar: "",
   });
   const fileRef = useRef(null);
 
@@ -2089,7 +2154,8 @@ function BulkUpload({ state, identity, onSave, onClose, notify }) {
       const d = {
         seconds: base.seconds,
         platform: common.platform,
-        variants: extras.map((f) => ({ id: f.id, seconds: f.seconds, title: f.title, driveUrl: f.driveUrl })),
+        variants: extras.map((f) => ({ id: f.id, seconds: f.seconds, title: f.title,
+          driveUrl: f.driveUrl, driveId: f.driveId || null, fileName: f.fileName })),
       };
       const code = deliveryCode(brief, editor, seq, common.platform);
       seq += 1;
@@ -2106,6 +2172,10 @@ function BulkUpload({ state, identity, onSave, onClose, notify }) {
       notify(politica.duracion === "libre"
         ? "Hay piezas sin duración. Completala antes de cargar."
         : "Hay piezas cuyo archivo no se pudo leer. Quitalas o volvé a exportarlas.");
+      return;
+    }
+    if (!String(common.avatar || "").trim()) {
+      notify("Poné a qué avatar apuntan estos videos antes de cargarlos.");
       return;
     }
     // Con Drive conectado, primero suben todos los archivos y recién después
@@ -2146,6 +2216,7 @@ function BulkUpload({ state, identity, onSave, onClose, notify }) {
       id: uid("d"), briefId: common.briefId, editorId: common.editorId, platform: common.platform,
       seconds: x.d.seconds, title: x.group.title || x.group.files[0].fileName,
       driveUrl: x.group.files[0].driveUrl || "", driveId: x.group.files[0].driveId || null,
+      avatar: String(common.avatar || "").trim(),
       status: common.status, date: common.date,
       seq: nextSeq(deliveries, common.briefId, common.editorId) + i, code: x.code,
       durationSource: x.group.files[0].durationSource || "file",
@@ -2193,6 +2264,10 @@ function BulkUpload({ state, identity, onSave, onClose, notify }) {
       {isAdmin && <Field label="Editor"><select className="sel" value={common.editorId} onChange={(e) => setCommon({ ...common, editorId: e.target.value })}>
         {config.editors.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
       </select></Field>}
+      <Field label="Avatar al que apunta" hint="Va en el nombre de todos los archivos de esta tanda.">
+        <input className="inp" value={common.avatar || ""} placeholder="El zombi de las madrugadas"
+          onChange={(e) => setCommon({ ...common, avatar: e.target.value })} />
+      </Field>
       <Field label="Plataforma"><select className="sel" value={common.platform} onChange={(e) => setCommon({ ...common, platform: e.target.value })}>
         {PLATFORM_IDS.map((pl) => <option key={pl} value={pl}>{PLATFORMS[pl].label}</option>)}
       </select></Field>
@@ -2328,7 +2403,10 @@ function DeliveriesScreen({ state, identity, actions }) {
             <tr key={d.id}>
               <td className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>{d.date.slice(5)}</td>
               <td className="mono" style={{ fontSize: 11, color: "var(--dim)" }}>{d.code}</td>
-              <td>{d.driveUrl ? <a className="rowlink" href={d.driveUrl} target="_blank" rel="noreferrer">{d.title}</a> : d.title}</td>
+              <td>
+                {d.driveUrl ? <a className="rowlink" href={d.driveUrl} target="_blank" rel="noreferrer">{d.title}</a> : d.title}
+                {d.avatar && <div className="mono" style={{ fontSize: 10, color: "var(--dim)" }}>{d.avatar}</div>}
+              </td>
               {isAdmin && <td style={{ fontSize: 12.5 }}>{nameOf(d.editorId)}</td>}
               <td className="mono" style={{ fontSize: 11.5, color: "var(--muted)" }}>{briefOf(d.briefId)}</td>
               <td><PlatformTag id={d.platform} /></td>
@@ -3092,18 +3170,37 @@ export default function App() {
         : b))
     ).then(() => notify("Nota publicada.")),
     notify,
-    saveDeliveries: (nuevos) => commitList(KEYS.deliveries, setDeliveries,
-      (list) => list.concat(assignCodes(nuevos, list, briefs, config)))
-      .then(() => notify(nuevos.length + (nuevos.length === 1 ? " pieza cargada." : " piezas cargadas."))),
-    saveDelivery: (d) => commitList(KEYS.deliveries, setDeliveries, (list) => {
-      const i = list.findIndex((x) => x.id === d.id);
-      const next = list.slice();
-      if (i === -1) {
-        // El código se sella acá, contra la lista recién leída del servidor.
-        next.push({ ...assignCode(d, list, briefs, config), createdAt: new Date().toISOString() });
-      } else next[i] = { ...list[i], ...d };
-      return next;
-    }).then(() => notify("Entrega guardada.")),
+    saveDeliveries: (nuevos) => {
+      let selladas = [];
+      return commitList(KEYS.deliveries, setDeliveries, (list) => {
+        selladas = assignCodes(nuevos, list, briefs, config);
+        return list.concat(selladas);
+      }).then(async () => {
+        notify(nuevos.length + (nuevos.length === 1 ? " pieza cargada." : " piezas cargadas."));
+        const archivos = selladas.reduce((a, d) => a.concat(nombresDePieza(d, { soloConDrive: true })), []);
+        if (archivos.length) await renombrarEnDrive(archivos);
+      });
+    },
+    saveDelivery: (d) => {
+      let sellada = null;
+      return commitList(KEYS.deliveries, setDeliveries, (list) => {
+        const i = list.findIndex((x) => x.id === d.id);
+        const next = list.slice();
+        if (i === -1) {
+          // El código se sella acá, contra la lista recién leída del servidor.
+          sellada = { ...assignCode(d, list, briefs, config), createdAt: new Date().toISOString() };
+          next.push(sellada);
+        } else { sellada = { ...list[i], ...d }; next[i] = sellada; }
+        return next;
+      }).then(async () => {
+        notify("Entrega guardada.");
+        // Recién ahora se conoce el número definitivo: ponemos el nombre real.
+        if (sellada) {
+          const archivos = nombresDePieza(sellada, { soloConDrive: true });
+          if (archivos.length) await renombrarEnDrive(archivos);
+        }
+      });
+    },
     deleteDelivery: (id) => commitList(KEYS.deliveries, setDeliveries, (list) =>
       list.map((x) => (x.id === id ? tombstone(x) : x))
     ).then(() => notify("Entrega eliminada.")),
