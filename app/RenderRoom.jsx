@@ -2754,7 +2754,16 @@ function PerformanceScreen({ state, identity, actions, notify }) {
   const scope = useMemo(() => expandCreatives(
     deliveries.filter((d) => (fEditor === "all" ? true : d.editorId === fEditor))), [deliveries, fEditor]);
   const { rows, orphans } = useMemo(() => rankCreatives(scope, meta, { sortBy, onlyWithData: true }), [scope, meta, sortBy]);
-  const totals = useMemo(() => aggregateMetrics(meta), [meta]);
+
+  // El editor solo ve los números de SUS creativos. El total de la cuenta
+  // —gasto, ROAS, impresiones— es información del negocio, no suya.
+  const totals = useMemo(() => {
+    if (isAdmin) return aggregateMetrics(meta);
+    const propias = rankCreatives(expandCreatives(
+      deliveries.filter((d) => d.editorId === identity.editorId)), meta, { onlyWithData: true })
+      .rows.reduce((a, r) => a.concat(r.rows), []);
+    return aggregateMetrics(propias);
+  }, [meta, deliveries, isAdmin, identity.editorId]);
 
   const byEditor = useMemo(() => {
     const out = {};
@@ -2774,7 +2783,8 @@ function PerformanceScreen({ state, identity, actions, notify }) {
       <div><h2>Rendimiento</h2>
         <p>Qué video funcionó y cuál no. El <b style={{ color: "var(--bone)" }}>hook rate</b> es reproducciones de 3 segundos sobre
           impresiones: mide si el primer segundo frena el scroll. El <b style={{ color: "var(--bone)" }}>hold rate</b> son ThruPlays
-          sobre impresiones: mide si el video sostiene. Cada hook de una misma pieza se mide por separado, con su letra al final del código.</p></div>
+          sobre impresiones: mide si el video sostiene. Cada hook de una misma pieza se mide por separado, con su letra al final del código.
+          {!isAdmin && " Los números de acá abajo son solo de tus videos."}</p></div>
       {isAdmin && <div className="split">
         {metaApi && <>
           <input className="inp mono" style={{ width: 140 }} type="date" value={rangoMeta.from}
@@ -2809,7 +2819,8 @@ function PerformanceScreen({ state, identity, actions, notify }) {
         <Stat label="Hook rate" value={pct(totals.hookRate)} red sub="3s / impresiones" />
         <Stat label="Hold rate" value={pct(totals.holdRate)} sub="thruplays / impresiones" />
         <Stat label="CTR" value={pct(totals.ctr)} sub="clics en el enlace" />
-        <Stat label="Gasto" value={fmtMoney(totals.spend, config.currency)} sub={fmtInt(totals.impressions) + " impresiones"} />
+        <Stat label={isAdmin ? "Gasto" : "Gasto en tus videos"} value={fmtMoney(totals.spend, config.currency)}
+          sub={fmtInt(totals.impressions) + " impresiones"} />
         <Stat label="ROAS" value={totals.roas == null ? "—" : totals.roas.toFixed(2) + "×"} sub={fmtInt(totals.purchases) + " compras"} />
       </div>
 
@@ -2933,7 +2944,7 @@ function PerformanceScreen({ state, identity, actions, notify }) {
               })}</tbody>
             </table>}
         </div>
-        {orphans.length > 0 && vista === "propios" && <div className="card-b" style={{ borderTop: "1px solid var(--line)" }}>
+        {isAdmin && orphans.length > 0 && vista === "propios" && <div className="card-b" style={{ borderTop: "1px solid var(--line)" }}>
           <div className="eyebrow" style={{ marginBottom: 6 }}>{orphans.length} anuncios sin video asociado</div>
           <div className="mono" style={{ fontSize: 11, color: "var(--dim)", lineHeight: 1.8 }}>
             {orphans.slice(0, 8).map((o) => o.adName).join(" · ")}{orphans.length > 8 ? " …" : ""}</div>
