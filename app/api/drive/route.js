@@ -39,7 +39,10 @@ export async function GET(req) {
     const metodo = await metodoConfigurado();
     return Response.json({
       ok: true, metodo,
-      carpetaRaiz: process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID ? 'cargada' : 'FALTA',
+      carpetaRaiz: process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID
+        ? String(process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID).trim()
+        : 'FALTA',
+      carpetaRaizLimpia: String(process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || '').trim() === String(process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || ''),
       conectar: metodo ? null : new URL(req.url).origin + '/api/google/auth?token=TU_APP_TOKEN',
     });
   }
