@@ -771,10 +771,10 @@ function periodGoal(dailyGoalMin, editorsCount, days) {
 function goalStatus(hecho, objetivo) {
   const o = Number(objetivo) || 0;
   if (o <= 0) return { pct: null, label: 'sin objetivo definido', cumplido: null };
-  const pct = (Number(hecho) || 0) / o;
-  const p = Math.round(pct * 100);
-  if (pct >= 1) return { pct, label: p + '% del objetivo · cumplido', cumplido: true };
-  return { pct, label: p + '% del objetivo · faltan ' + (Math.round((o - hecho) * 100) / 100) + ' min', cumplido: false };
+  const razon = (Number(hecho) || 0) / o;
+  const p = Math.round(razon * 100);
+  if (razon >= 1) return { pct: razon, label: p + '% del objetivo · cumplido', cumplido: true };
+  return { pct: razon, label: p + '% del objetivo · faltan ' + (Math.round((o - hecho) * 100) / 100) + ' min', cumplido: false };
 }
 
 function briefProgress(brief, deliveries) {
@@ -854,7 +854,7 @@ function extensionDe(nombre) {
   return m ? "." + m[1].toLowerCase() : ".mp4";
 }
 /** 2026-08-09_HGRA-MAR-03-FLOW-A_zombi-madrugadas.mp4 */
-function nombreArchivo(opts) {
+function armarNombreArchivo(opts) {
   const o = opts || {};
   const fecha = /^\d{4}-\d{2}-\d{2}$/.test(o.date || "") ? o.date : todayISO();
   const codigo = String(o.code || "SIN-CODIGO") + (o.letra ? "-" + o.letra : "");
@@ -868,11 +868,11 @@ function nombresDePieza(delivery, opts) {
   const base = { date: delivery.date, code: delivery.code, avatar: delivery.avatar };
   const out = [{
     driveId: delivery.driveId || null,
-    nombre: nombreArchivo({ ...base, letra: (delivery.variants || []).length ? "A" : "", fileName: delivery.fileName }),
+    nombre: armarNombreArchivo({ ...base, letra: (delivery.variants || []).length ? "A" : "", fileName: delivery.fileName }),
   }];
   (delivery.variants || []).forEach((v, i) => {
     out.push({ driveId: v.driveId || null,
-      nombre: nombreArchivo({ ...base, letra: variantLabel(i + 1), fileName: v.fileName }) });
+      nombre: armarNombreArchivo({ ...base, letra: variantLabel(i + 1), fileName: v.fileName }) });
   });
   return out.filter((x) => (o.soloConDrive ? x.driveId : true));
 }
@@ -1820,7 +1820,7 @@ function DeliveryEditor({ delivery, state, identity, onSave, onClose, onDelete }
         const r = await subirADrive(file, {
           briefCode: brief ? brief.code : "", briefTitulo: brief ? brief.title : "",
           editorNombre: editor ? editor.name : identity.name,
-          nombreFinal: nombreArchivo({ date: f.date, code, avatar: f.avatar,
+          nombreFinal: armarNombreArchivo({ date: f.date, code, avatar: f.avatar,
             letra: variants.length ? "A" : "", fileName: file.name }),
         }, (pct) => setProgreso(pct));
         setProgreso(null);
@@ -1869,7 +1869,7 @@ function DeliveryEditor({ delivery, state, identity, onSave, onClose, onDelete }
       const r = await subirADrive(file, {
         briefCode: brief ? brief.code : "", briefTitulo: brief ? brief.title : "",
         editorNombre: editor ? editor.name : identity.name,
-        nombreFinal: nombreArchivo({ date: f.date, code, avatar: f.avatar,
+        nombreFinal: armarNombreArchivo({ date: f.date, code, avatar: f.avatar,
           letra: variantLabel(i + 1), fileName: file.name }),
       }, (pct) => setProgresoHook({ i, pct }));
       setVariant(i, { driveUrl: r.url || "", driveId: r.driveId });
