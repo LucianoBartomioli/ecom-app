@@ -19,6 +19,65 @@ function autorizado(req) {
 
 const num = (v) => (isFinite(Number(v)) ? Number(v) : 0);
 
+/**
+ * Trae el nombre del ARCHIVO de video de cada anuncio.
+ *
+ * El nombre del anuncio lo escribe una persona y puede decir cualquier cosa.
+ * El del archivo, en cambio, es el que puso la app al subirlo a Drive, y lleva
+ * el código adentro. Cruzar por ahí es mucho más confiable.
+ */
+async function nombresDeVideo(cuenta, token) {
+  const mapa = {};
+  try {
+    const qs = new URLSearchParams({
+      fields: "id,name,creative{video_id,effective_object_story_id,object_story_spec}",
+      limit: "500",
+      access_token: token,
+    });
+    let url = "https://graph.facebook.com/" + VERSION + "/" + cuenta + "/ads?" + qs.toString();
+    const anuncios = [];
+    let vueltas = 0;
+    while (url && vueltas < 10) {
+      const r = await fetch(url, { cache: "no-store" });
+      const j = await r.json();
+      if (j.error) return mapa;
+      for (const a of j.data || []) anuncios.push(a);
+      url = j.paging && j.paging.next ? j.paging.next : null;
+      vueltas++;
+    }
+
+    // De cada anuncio sacamos el id del video, esté donde esté.
+    const porVideo = {};
+    for (const a of anuncios) {
+      const c = a.creative || {};
+      const spec = c.object_story_spec || {};
+      const videoId = c.video_id
+        || (spec.video_data && spec.video_data.video_id)
+        || null;
+      if (videoId) (porVideo[videoId] = porVideo[videoId] || []).push(a.id);
+    }
+
+    // Los nombres de los videos se piden de a tandas.
+    const ids = Object.keys(porVideo);
+    for (let i = 0; i < ids.length; i += 50) {
+      const tanda = ids.slice(i, i + 50);
+      const r = await fetch("https://graph.facebook.com/" + VERSION + "/?" + new URLSearchParams({
+        ids: tanda.join(","), fields: "id,title,source", access_token: token,
+      }).toString(), { cache: "no-store" });
+      const j = await r.json();
+      if (j.error) break;
+      for (const videoId of tanda) {
+        const v = j[videoId];
+        if (!v) continue;
+        // 'title' suele traer el nombre del archivo tal como se subió.
+        const nombre = v.title || "";
+        for (const adId of porVideo[videoId]) mapa[adId] = nombre;
+      }
+    }
+  } catch (e) { /* si falla, seguimos con el nombre del anuncio */ }
+  return mapa;
+}
+
 function primerValor(arr, tipos) {
   if (!Array.isArray(arr)) return 0;
   for (const tipo of tipos) {
@@ -61,6 +120,8 @@ export async function GET(req) {
   else params.set("date_preset", searchParams.get("preset") || "last_30d");
 
   try {
+    const mapaVideos = searchParams.get("sinVideos") ? {} : await nombresDeVideo(cuenta, token);
+
     let url = "https://graph.facebook.com/" + VERSION + "/" + cuenta + "/insights?" + params.toString();
     const filas = [];
     let vueltas = 0;
@@ -74,6 +135,8 @@ export async function GET(req) {
         filas.push({
           adId: d.ad_id,
           adName: d.ad_name,
+          // El nombre del archivo es lo que cruza con la entrega.
+          videoName: mapaVideos[d.ad_id] || "",
           campana: d.campaign_name,
           conjunto: d.adset_name,
           date: d.date_start,
@@ -96,7 +159,8 @@ export async function GET(req) {
       vueltas++;
     }
 
-    return Response.json({ ok: true, total: filas.length, filas });
+    const conVideo = filas.filter((f) => f.videoName).length;
+    return Response.json({ ok: true, total: filas.length, conNombreDeVideo: conVideo, filas });
   } catch (e) {
     return Response.json({ error: "Meta falló: " + e.message }, { status: 500 });
   }
