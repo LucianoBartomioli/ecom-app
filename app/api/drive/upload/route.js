@@ -18,7 +18,19 @@ import { rutaDeCarpetas, consultaCarpeta, nombreCarpetaSegura } from "../../../.
 export const runtime = "nodejs";
 
 const APP_TOKEN = process.env.APP_TOKEN || "";
-const RAIZ = process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || "";
+/**
+ * Limpia el id de carpeta: espacios invisibles al copiar, comillas,
+ * y el caso de haber pegado la URL entera en vez del id solo.
+ */
+function limpiarIdCarpeta(bruto) {
+  let v = String(bruto || "").trim().replace(/^["']|["']$/g, "");
+  const m = v.match(/\/folders\/([A-Za-z0-9_-]+)/);
+  if (m) v = m[1];
+  v = v.split("?")[0].split("#")[0].trim();
+  return v;
+}
+
+const RAIZ = limpiarIdCarpeta(process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID);
 const ALCANCE = "https://www.googleapis.com/auth/drive";
 const MAX_BYTES = 5 * 1024 * 1024 * 1024; // 5 GB por archivo
 
@@ -130,6 +142,18 @@ export async function POST(req) {
     });
   } catch (e) {
     const msg = String(e.message || e);
+    if (/File not found/i.test(msg)) {
+      return Response.json(
+        {
+          error: "Google no encuentra la carpeta " + RAIZ + ".",
+          queHacer:
+            "Revisá que GOOGLE_DRIVE_ROOT_FOLDER_ID sea solo el código que va después de /folders/ en la URL de Drive, " +
+            "sin espacios ni comillas, y que la cuenta que autorizaste sea la dueña de esa carpeta. " +
+            "Después de corregirla hay que redesplegar.",
+        },
+        { status: 404 }
+      );
+    }
     if (/storage quota|storageQuotaExceeded/i.test(msg)) {
       return Response.json(
         {
