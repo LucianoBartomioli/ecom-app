@@ -695,6 +695,31 @@ async function subirADrive(file, contexto, onProgreso) {
   };
 }
 
+/** Trae las métricas directo de Meta, sin pasar por el CSV. */
+async function sincronizarMeta(desde, hasta) {
+  const api = RR_API();
+  if (!api) throw new Error("Esta copia no tiene servidor detrás.");
+  const p = new URLSearchParams();
+  if (desde && hasta) { p.set("desde", desde); p.set("hasta", hasta); }
+  const r = await fetch("/api/meta?" + p.toString(), { headers: { "x-app-token": api.token } });
+  let j = {};
+  try { j = await r.json(); } catch (e) { /* sin json */ }
+  if (!r.ok || j.error) throw new Error(j.error || "Meta no respondió.");
+  return { filas: j.filas || [], conNombreDeVideo: j.conNombreDeVideo || 0 };
+}
+
+let _metaEstado = null;
+async function metaDisponible() {
+  if (_metaEstado !== null) return _metaEstado;
+  const api = RR_API();
+  if (!api) { _metaEstado = false; return false; }
+  try {
+    const r = await fetch("/api/meta?preset=today", { headers: { "x-app-token": api.token } });
+    _metaEstado = r.ok;
+  } catch (e) { _metaEstado = false; }
+  return _metaEstado;
+}
+
 /** Vista previa de Drive, que sirve igual para PDF y para video. */
 const previewDrive = (driveId) => "https://drive.google.com/file/d/" + driveId + "/preview";
 
@@ -979,7 +1004,7 @@ function aggregateMetrics(rows) {
 function rankCreatives(deliveries, metaRows, opts) {
   const o = opts || {}, byKey = {};
   (metaRows || []).forEach((r) => {
-    [norm(r.deliveryId), norm(r.code), norm(r.adName)].filter(Boolean).forEach((k) => { (byKey[k] = byKey[k] || []).push(r); });
+    [norm(r.deliveryId), norm(r.code), norm(r.adName), norm(r.videoName)].filter(Boolean).forEach((k) => { (byKey[k] = byKey[k] || []).push(r); });
   });
   const used = {};
   const rows = (deliveries || []).map((d) => {
@@ -1001,7 +1026,7 @@ function rankCreatives(deliveries, metaRows, opts) {
     return o.asc ? av - bv : bv - av;
   });
   const orphans = (metaRows || []).filter((r) => {
-    const keys = [norm(r.deliveryId), norm(r.code), norm(r.adName)].filter(Boolean);
+    const keys = [norm(r.deliveryId), norm(r.code), norm(r.adName), norm(r.videoName)].filter(Boolean);
     return !keys.some((k) => used[k] || Object.keys(used).some((u) => k.indexOf(u) !== -1));
   });
   return { rows, orphans };
@@ -2638,6 +2663,10 @@ function PerformanceScreen({ state, identity, actions, notify }) {
   const { deliveries, meta, config, briefs } = state;
   const isAdmin = identity.role === "admin";
   const [imp, setImp] = useState(false);
+  const [metaApi, setMetaApi] = useState(false);
+  const [sincronizando, setSincronizando] = useState(false);
+  const [rangoMeta, setRangoMeta] = useState({ from: addDays(todayISO(), -29), to: todayISO() });
+  useEffect(() => { let vivo = true; metaDisponible().then((d) => { if (vivo) setMetaApi(d); }); return () => { vivo = false; }; }, []);
   const [sortBy, setSortBy] = useState("hookRate");
   const [fEditor, setFEditor] = useState(isAdmin ? "all" : identity.editorId);
 
@@ -2665,12 +2694,35 @@ function PerformanceScreen({ state, identity, actions, notify }) {
         <p>Qué video funcionó y cuál no. El <b style={{ color: "var(--bone)" }}>hook rate</b> es reproducciones de 3 segundos sobre
           impresiones: mide si el primer segundo frena el scroll. El <b style={{ color: "var(--bone)" }}>hold rate</b> son ThruPlays
           sobre impresiones: mide si el video sostiene. Cada hook de una misma pieza se mide por separado, con su letra al final del código.</p></div>
-      {isAdmin && <button className="btn primary" onClick={() => setImp(true)}>Importar CSV de Meta</button>}
+      {isAdmin && <div className="split">
+        {metaApi && <>
+          <input className="inp mono" style={{ width: 140 }} type="date" value={rangoMeta.from}
+            onChange={(e) => setRangoMeta({ ...rangoMeta, from: e.target.value })} />
+          <input className="inp mono" style={{ width: 140 }} type="date" value={rangoMeta.to}
+            max={todayISO()} min={rangoMeta.from}
+            onChange={(e) => setRangoMeta({ ...rangoMeta, to: e.target.value })} />
+          <button className="btn primary" disabled={sincronizando} onClick={async () => {
+            const chequeo = validateRange(rangoMeta.from, rangoMeta.to);
+            if (!chequeo.ok) { notify(chequeo.error); return; }
+            setSincronizando(true);
+            try {
+              const r = await sincronizarMeta(rangoMeta.from, rangoMeta.to);
+              if (!r.filas.length) notify("Meta no devolvió datos para ese rango.");
+              else {
+                actions.addMeta(r.filas);
+                notify(r.filas.length + " filas traídas · " + r.conNombreDeVideo + " con nombre de archivo.");
+              }
+            } catch (e) { notify("No pude traer los datos: " + e.message); }
+            setSincronizando(false);
+          }}>{sincronizando ? "Trayendo…" : "Traer de Meta"}</button>
+        </>}
+        <button className={metaApi ? "btn" : "btn primary"} onClick={() => setImp(true)}>Importar CSV</button>
+      </div>}
     </div>
 
     {meta.length === 0 ? <Empty title="Todavía no hay métricas cargadas">
-      {isAdmin ? "Exportá el reporte por anuncio desde el Administrador de anuncios e importalo. Se cruza solo con tus videos por el código del nombre."
-        : "Cuando Lucho importe los datos de Meta, vas a ver acá cómo rindió cada video tuyo."}
+      {isAdmin ? "Apretá \u0022Traer de Meta\u0022 y las métricas entran solas. Se cruzan con tus videos por el nombre del archivo, que ya lleva el código adentro."
+        : "Cuando " + config.adminName + " traiga los datos de Meta, vas a ver acá cómo rindió cada video tuyo."}
     </Empty> : <>
       <div className="grid" style={{ gridTemplateColumns: "repeat(auto-fit,minmax(150px,1fr))", marginBottom: 18 }}>
         <Stat label="Hook rate" value={pct(totals.hookRate)} red sub="3s / impresiones" />
@@ -2716,7 +2768,8 @@ function PerformanceScreen({ state, identity, actions, notify }) {
         </div>
         <div className="scroll">
           {rows.length === 0 ? <Empty title="Ningún video cruzó con las métricas">
-            Revisá que el nombre del anuncio en Meta contenga el código del video (por ejemplo HGRA-MAR-03-FLOW-A).
+            El cruce se hace por el nombre del archivo de video, o por el del anuncio si el archivo no tiene nombre.
+            Revisá que alguno de los dos contenga el código (por ejemplo HGRA-MAR-03-FLOW-A).
           </Empty> :
             <table className="tbl">
               <thead><tr>
@@ -2731,7 +2784,10 @@ function PerformanceScreen({ state, identity, actions, notify }) {
                   <td className="mono" style={{ color: top ? "var(--red)" : "var(--dim)", fontSize: 11.5 }}>{String(i + 1).padStart(2, "0")}</td>
                   <td>
                     <div style={{ fontSize: 13 }}>{d.driveUrl ? <a className="rowlink" href={d.driveUrl} target="_blank" rel="noreferrer">{d.title}</a> : d.title}</div>
-                    <div className="mono" style={{ fontSize: 10, color: "var(--dim)" }}>{d.code}</div>
+                    <div className="mono" style={{ fontSize: 10, color: "var(--dim)" }}>
+                      {d.code}
+                      {r.rows && r.rows[0] && r.rows[0].videoName
+                        ? " · " + String(r.rows[0].videoName).slice(0, 44) : ""}</div>
                   </td>
                   {isAdmin && <td style={{ fontSize: 12.5 }}>{nameOf(d.editorId)}</td>}
                   <td><PlatformTag id={d.platform} /></td>
