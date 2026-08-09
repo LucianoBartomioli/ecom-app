@@ -205,6 +205,9 @@ const CSS = `
    NÚCLEO  (idéntico al módulo testeado en core.js)
    ============================================================ */
 
+/** Se muestra abajo a la izquierda: sirve para saber qué versión está corriendo. */
+const VERSION_APP = "2026-08-09 · 4";
+
 const PLATFORMS = {
   flow: { id: "flow", label: "Flow", kind: "ia_clip", defaultWeight: 1, color: "var(--flow)", note: "Clips cortos de IA. Muchas regeneraciones por clip usable." },
   higgsfield: { id: "higgsfield", label: "Higgsfield", kind: "ia_clip", defaultWeight: 1, color: "var(--higgs)", note: "Clips cortos de IA. Muchas regeneraciones por clip usable." },
@@ -1036,6 +1039,60 @@ function csvCell(v) {
   return /[",;\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
 }
 const csvRow = (arr) => (arr || []).map(csvCell).join(",");
+
+/**
+ * Resume TODO lo que hay en la cuenta de Meta, haya cruzado o no con una
+ * entrega. Sirve para ver la actividad completa y para verificar que la
+ * conexión funciona antes de que exista un solo video propio arriba.
+ */
+function resumirAnuncios(metaRows, deliveries) {
+  const unidades = expandCreatives(deliveries || []);
+  const codigos = unidades
+    .filter((d) => d.code)
+    .map((d) => ({ code: d.code, clave: norm(d.code), titulo: d.title, editorId: d.editorId }));
+
+  const porAnuncio = {};
+  (metaRows || []).forEach((r) => {
+    const clave = norm(r.adId) || norm(r.adName) || norm(r.videoName) || 'sin-nombre';
+    if (!porAnuncio[clave]) {
+      porAnuncio[clave] = {
+        clave,
+        adName: r.adName || '',
+        videoName: r.videoName || '',
+        campana: r.campana || '',
+        conjunto: r.conjunto || '',
+        filas: [],
+      };
+    }
+    const a = porAnuncio[clave];
+    if (!a.videoName && r.videoName) a.videoName = r.videoName;
+    if (!a.campana && r.campana) a.campana = r.campana;
+    a.filas.push(r);
+  });
+
+  const lista = Object.keys(porAnuncio).map((k) => {
+    const a = porAnuncio[k];
+    const texto = norm(a.videoName) + norm(a.adName);
+    let cruce = null;
+    for (let i = 0; i < codigos.length; i++) {
+      if (codigos[i].clave && texto.indexOf(codigos[i].clave) !== -1) { cruce = codigos[i]; break; }
+    }
+    return { ...a, metrics: aggregateMetrics(a.filas), cruce };
+  });
+
+  lista.sort((x, y) => (y.metrics.spend || 0) - (x.metrics.spend || 0));
+
+  return {
+    anuncios: lista,
+    total: aggregateMetrics(metaRows || []),
+    cruzados: lista.filter((x) => x.cruce).length,
+    sinCruzar: lista.filter((x) => !x.cruce).length,
+    campanas: Object.keys(lista.reduce((acc, x) => {
+      if (x.campana) acc[x.campana] = 1;
+      return acc;
+    }, {})).length,
+  };
+}
 
 function parseCSV(text) {
   const rows = []; let row = [], field = "", i = 0, inQ = false;
@@ -2116,6 +2173,7 @@ function BulkUpload({ state, identity, onSave, onClose, notify }) {
   const politica = deliveryFieldPolicy(identity);
   const [drive, setDrive] = useState(false);
   const [subiendo, setSubiendo] = useState(null);
+  const [trabas, setTrabas] = useState([]);
   useEffect(() => { let vivo = true; driveDisponible().then((d) => { if (vivo) setDrive(d); }); return () => { vivo = false; }; }, []);
   const [common, setCommon] = useState({
     briefId: myBriefs[0] ? myBriefs[0].id : "",
@@ -2189,20 +2247,31 @@ function BulkUpload({ state, identity, onSave, onClose, notify }) {
   }, [groups, common, brief, editor, deliveries, config]);
 
   const totalPond = preview.reduce((a, x) => a + x.pond, 0);
+
+  /** Todo lo que impide cargar, junto, para mostrarlo fijo en pantalla. */
+  const motivosParaNoCargar = () => {
+    const lista = [];
+    if (!groups.length) lista.push("Todavía no soltaste ningún archivo.");
+    const sinDuracion = preview.filter((x) => !x.d.seconds).length;
+    if (sinDuracion) {
+      lista.push(sinDuracion + (sinDuracion === 1 ? " pieza no tiene duración" : " piezas no tienen duración")
+        + (politica.duracion === "libre" ? ". Completala abajo." : ". Volvé a exportar el archivo o quitalo."));
+    }
+    if (!String(common.avatar || "").trim()) {
+      lista.push("Falta decir a qué avatar apuntan estos videos.");
+    }
+    if (drive) {
+      const sinArchivo = groups.reduce((a, g) => a + g.files.filter((f) => !f.handle && !f.driveId).length, 0);
+      if (sinArchivo) lista.push(sinArchivo + " archivos se perdieron. Quitalos y volvé a soltarlos.");
+    }
+    return lista;
+  };
   const ilegibles = groups.reduce((a, g) => a.concat(g.files.filter((f) => f.unread)), []);
 
   const guardar = async () => {
-    const faltantes = preview.filter((x) => !x.d.seconds);
-    if (faltantes.length) {
-      notify(politica.duracion === "libre"
-        ? "Hay piezas sin duración. Completala antes de cargar."
-        : "Hay piezas cuyo archivo no se pudo leer. Quitalas o volvé a exportarlas.");
-      return;
-    }
-    if (!String(common.avatar || "").trim()) {
-      notify("Poné a qué avatar apuntan estos videos antes de cargarlos.");
-      return;
-    }
+    const trabas = motivosParaNoCargar();
+    if (trabas.length) { setTrabas(trabas); return; }
+    setTrabas([]);
     // Con Drive conectado, primero suben todos los archivos y recién después
     // se registran las entregas, para no dejar registros sin video.
     if (drive) {
@@ -2305,6 +2374,16 @@ function BulkUpload({ state, identity, onSave, onClose, notify }) {
       </select></Field>
     </div>
 
+    {trabas.length > 0 && <div className="aviso" style={{ marginBottom: 12 }}>
+      <b style={{ display: "block", marginBottom: 4 }}>No puedo cargar todavía</b>
+      {trabas.map((m, i) => <div key={i} style={{ fontSize: 12.5 }}>· {m}</div>)}
+    </div>}
+    {drive === false && groups.length > 0 && <div className="aviso" style={{ marginBottom: 12 }}>
+      <b style={{ display: "block", marginBottom: 4 }}>Drive sin conectar</b>
+      <span style={{ fontSize: 12.5 }}>
+        Las piezas se van a registrar, pero los archivos no se suben. Subilos vos a Drive con el nombre que
+        muestra cada fila.</span>
+    </div>}
     {subiendo && <div className="aviso" style={{ marginBottom: 12 }}>
       <b style={{ display: "block", marginBottom: 4 }}>
         Subiendo a Drive — archivo {subiendo.hechos + 1} de {subiendo.total}</b>
@@ -2668,6 +2747,8 @@ function PerformanceScreen({ state, identity, actions, notify }) {
   const [rangoMeta, setRangoMeta] = useState({ from: addDays(todayISO(), -29), to: todayISO() });
   useEffect(() => { let vivo = true; metaDisponible().then((d) => { if (vivo) setMetaApi(d); }); return () => { vivo = false; }; }, []);
   const [sortBy, setSortBy] = useState("hookRate");
+  const [vista, setVista] = useState("propios");
+  const cuenta = useMemo(() => resumirAnuncios(meta, deliveries), [meta, deliveries]);
   const [fEditor, setFEditor] = useState(isAdmin ? "all" : identity.editorId);
 
   const scope = useMemo(() => expandCreatives(
@@ -2753,7 +2834,57 @@ function PerformanceScreen({ state, identity, actions, notify }) {
         </table></div>
       </div>}
 
-      <div className="card">
+      {isAdmin && <div className="seg" style={{ marginBottom: 16 }}>
+        <button className={vista === "propios" ? "on" : ""} onClick={() => setVista("propios")}>
+          Nuestros creativos</button>
+        <button className={vista === "cuenta" ? "on" : ""} onClick={() => setVista("cuenta")}>
+          Toda la cuenta ({cuenta.anuncios.length})</button>
+      </div>}
+
+      {isAdmin && vista === "cuenta" && <div className="card">
+        <div className="card-h">
+          <h3 style={{ fontSize: 14 }}>Todo lo que corre en Meta</h3>
+          <span className="hint" style={{ marginTop: 0 }}>
+            {cuenta.campanas} campañas · {cuenta.cruzados} anuncios cruzados con entregas ·{" "}
+            {cuenta.sinCruzar} sin cruzar</span>
+        </div>
+        <div className="scroll">
+          {cuenta.anuncios.length === 0
+            ? <Empty title="No hay nada todavía">Traé los datos de Meta con el botón de arriba.</Empty>
+            : <table className="tbl">
+              <thead><tr>
+                <th>Anuncio</th><th>Campaña</th><th>Cruce</th>
+                <th className="num">Gasto</th><th className="num">Impr.</th>
+                <th className="num">Hook</th><th className="num">CTR</th><th className="num">ROAS</th>
+              </tr></thead>
+              <tbody>{cuenta.anuncios.map((a) => (
+                <tr key={a.clave}>
+                  <td>
+                    <div style={{ fontSize: 13 }}>{a.adName || "sin nombre"}</div>
+                    {a.videoName && <div className="mono" style={{ fontSize: 10, color: "var(--dim)" }}>
+                      {a.videoName.slice(0, 52)}</div>}
+                  </td>
+                  <td style={{ fontSize: 12.5, color: "var(--muted)" }}>{a.campana || "—"}</td>
+                  <td>{a.cruce
+                    ? <Chip tone="ok">{a.cruce.code}</Chip>
+                    : <Chip>sin cruzar</Chip>}</td>
+                  <td className="num mono">{fmtMin(a.metrics.spend)}</td>
+                  <td className="num mono">{fmtInt(a.metrics.impressions)}</td>
+                  <td className="num mono" style={{ color: "var(--red)" }}>{pct(a.metrics.hookRate)}</td>
+                  <td className="num mono">{pct(a.metrics.ctr)}</td>
+                  <td className="num mono">{a.metrics.roas == null ? "—" : a.metrics.roas.toFixed(2) + "×"}</td>
+                </tr>))}</tbody>
+            </table>}
+        </div>
+        {cuenta.sinCruzar > 0 && <div className="card-b" style={{ borderTop: "1px solid var(--line)" }}>
+          <div className="hint" style={{ marginTop: 0 }}>
+            Los que dicen "sin cruzar" son anuncios que no corresponden a ninguna entrega cargada:
+            creativos viejos, de otra fuente, o subidos sin el nombre que da la app. No es un error.
+          </div>
+        </div>}
+      </div>}
+
+      {(!isAdmin || vista === "propios") && <div className="card">
         <div className="card-h">
           <h3 style={{ fontSize: 14 }}>Ranking de creativos</h3>
           <div className="split">
@@ -2802,13 +2933,13 @@ function PerformanceScreen({ state, identity, actions, notify }) {
               })}</tbody>
             </table>}
         </div>
-        {orphans.length > 0 && <div className="card-b" style={{ borderTop: "1px solid var(--line)" }}>
+        {orphans.length > 0 && vista === "propios" && <div className="card-b" style={{ borderTop: "1px solid var(--line)" }}>
           <div className="eyebrow" style={{ marginBottom: 6 }}>{orphans.length} anuncios sin video asociado</div>
           <div className="mono" style={{ fontSize: 11, color: "var(--dim)", lineHeight: 1.8 }}>
             {orphans.slice(0, 8).map((o) => o.adName).join(" · ")}{orphans.length > 8 ? " …" : ""}</div>
           <div className="hint">Renombrá el anuncio en Meta con el código del video, o editá el video y poné ese nombre exacto.</div>
         </div>}
-      </div>
+      </div>}
     </>}
 
     {imp && <MetaImport onClose={() => setImp(false)}
@@ -3341,6 +3472,7 @@ export default function App() {
           <div className="mono" style={{ fontSize: 10 }}>
             {sync === "ok" ? "Sincronizado con el equipo" : sync === "local" ? "Modo local (sin sincronizar)" : "Error al guardar"}
           </div>
+          <div className="mono" style={{ fontSize: 9.5, color: "var(--dim)", marginTop: 3 }}>v{VERSION_APP}</div>
         </div>
       </nav>
 
